@@ -915,7 +915,11 @@ func main() {
 	flag.Parse()
 
 	if flag.NArg() > 0 && repos == "" {
-		repos = strings.Join(flag.Args(), ",")
+		if localDir != "" {
+			// With -local, positional args are project names, not repos
+		} else {
+			repos = strings.Join(flag.Args(), ",")
+		}
 	}
 
 	if logFile != "" {
@@ -953,8 +957,6 @@ func main() {
 		}
 	}
 
-	standalone, groups := parseRepoList(lines)
-
 	// Build task list
 	type task struct {
 		name  string
@@ -962,16 +964,26 @@ func main() {
 	}
 	var tasks []task
 
-	for _, entry := range standalone {
-		parts := strings.Split(entry.Repo, "/")
-		name := entry.Repo
-		if len(parts) >= 2 {
-			name = parts[len(parts)-1]
+	if localDir != "" {
+		// Local mode: project name from positional arg or directory name
+		projectName := filepath.Base(localDir)
+		if flag.NArg() > 0 {
+			projectName = flag.Arg(0)
 		}
-		tasks = append(tasks, task{name: name, repos: []string{entry.Repo}})
-	}
-	for project, repoList := range groups {
-		tasks = append(tasks, task{name: project, repos: repoList})
+		tasks = append(tasks, task{name: projectName, repos: []string{projectName}})
+	} else {
+		standalone, groups := parseRepoList(lines)
+		for _, entry := range standalone {
+			parts := strings.Split(entry.Repo, "/")
+			name := entry.Repo
+			if len(parts) >= 2 {
+				name = parts[len(parts)-1]
+			}
+			tasks = append(tasks, task{name: name, repos: []string{entry.Repo}})
+		}
+		for project, repoList := range groups {
+			tasks = append(tasks, task{name: project, repos: repoList})
+		}
 	}
 
 	if len(tasks) == 0 {
