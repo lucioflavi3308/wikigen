@@ -50,18 +50,11 @@ func (p *Progress) print() {
 	if p.totalItems > 0 {
 		pct = done * 100 / p.totalItems
 	}
-	// Clear previous lines and reprint
-	lineCount := len(p.current) + 1
-	for i := 0; i < lineCount; i++ {
-		fmt.Fprintf(os.Stderr, "\033[2K") // clear line
-		if i < lineCount-1 {
-			fmt.Fprintf(os.Stderr, "\033[A") // move up
-		}
-	}
-	fmt.Fprintf(os.Stderr, "\r── Progress: %d/%d wikis (%d%%) ──\n", done, p.totalItems, pct)
+	var parts []string
 	for name, status := range p.current {
-		fmt.Fprintf(os.Stderr, "  %s  %s\n", name, status)
+		parts = append(parts, fmt.Sprintf("%s %s", name, status))
 	}
+	fmt.Fprintf(os.Stderr, "\r\033[K[%d/%d %d%%] %s", done, p.totalItems, pct, strings.Join(parts, " | "))
 }
 
 // ── Wiki Page ──
@@ -535,7 +528,7 @@ func generateWiki(claudePath, model string, projectName string, repos []string, 
 	if len(pages) == 0 {
 		return result, fmt.Errorf("no pages found in structure")
 	}
-	log.Printf("[%s] Structure: %d pages", projectName, len(pages))
+	// structure determined — progress display handles this
 	result.TotalPages = len(pages)
 
 	var allPages []WikiPage
@@ -556,7 +549,7 @@ func generateWiki(claudePath, model string, projectName string, repos []string, 
 	// Dry run: stop after structure
 	if dryRun {
 		result.Status = "dry-run"
-		log.Printf("[%s] Dry run: %d pages planned in %s/", projectName, len(allPages), wikiDir)
+		fmt.Fprintf(os.Stderr, "\n[%s] Dry run: %d pages planned in %s/\n", projectName, len(allPages), wikiDir)
 		progress.done(projectName)
 		return result, nil
 	}
@@ -584,7 +577,7 @@ func generateWiki(claudePath, model string, projectName string, repos []string, 
 			for attempt := 1; attempt <= maxRetries; attempt++ {
 				if attempt > 1 {
 					progress.set(projectName, fmt.Sprintf("🔄 %d/%d %s (retry %d)", idx+1, len(allPages), page.Title, attempt))
-					log.Printf("[%s] Retrying page %s (attempt %d/%d)", projectName, page.Title, attempt, maxRetries)
+					// retry shown via progress display
 				}
 
 				// Remove previous failed file
@@ -592,7 +585,7 @@ func generateWiki(claudePath, model string, projectName string, repos []string, 
 
 				_, err := claudeCall(claudePath, model, repoDirs, "", pagePrompt(*page, allPages, projectName, repos, language), wikiDir)
 				if err != nil {
-					log.Printf("[%s] page %s attempt %d failed: %v", projectName, page.Title, attempt, err)
+					// error logged to _errors.log
 					continue
 				}
 
@@ -610,8 +603,7 @@ func generateWiki(claudePath, model string, projectName string, repos []string, 
 				os.WriteFile(filename, []byte(fmt.Sprintf("# %s\n\n*Content generation failed after %d attempts*\n", page.Title, maxRetries)), 0644)
 			}
 
-			done := atomic.AddInt32(&pageDone, 1)
-			log.Printf("[%s] Page %d/%d saved: %s (%d chars)", projectName, done, len(allPages), page.Title, len(page.Content))
+			atomic.AddInt32(&pageDone, 1)
 		}(i)
 	}
 	pageWg.Wait()
@@ -632,7 +624,7 @@ func generateWiki(claudePath, model string, projectName string, repos []string, 
 	result.Failed = failedCount
 	result.Status = "completed"
 
-	log.Printf("[%s] ✅ completed %s/ (%d pages, %d failed)", projectName, wikiDir, len(allPages), failedCount)
+	fmt.Fprintf(os.Stderr, "\n✅ [%s] %d pages in %s/\n", projectName, len(allPages)-failedCount, wikiDir)
 	progress.done(projectName)
 	return result, nil
 }
