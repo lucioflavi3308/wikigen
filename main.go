@@ -449,7 +449,7 @@ func generateWiki(claudePath, model string, projectName string, repos []string, 
 		repoName := strings.TrimSuffix(parts[1], ".git")
 
 		progress.set(projectName, fmt.Sprintf("📥 cloning %s/%s...", owner, repoName))
-		repoDir := filepath.Join(cloneDir, fmt.Sprintf("%s_%s", owner, repoName))
+		repoDir, _ := filepath.Abs(filepath.Join(cloneDir, fmt.Sprintf("%s_%s", owner, repoName)))
 		if err := gitClone(repoURL, token, repoDir); err != nil {
 			return fmt.Errorf("clone %s: %w", repo, err)
 		}
@@ -457,7 +457,7 @@ func generateWiki(claudePath, model string, projectName string, repos []string, 
 	}
 
 	// Create output directory
-	wikiDir := filepath.Join(outputDir, projectName)
+	wikiDir, _ := filepath.Abs(filepath.Join(outputDir, projectName))
 	if err := os.MkdirAll(wikiDir, 0755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
