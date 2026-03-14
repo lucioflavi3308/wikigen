@@ -18,36 +18,36 @@ import (
 
 type Progress struct {
 	mu         sync.Mutex
-	totalRepos int
-	doneRepos  int32
+	totalItems int
+	doneItems  int32
 	current    map[string]string
 }
 
 func newProgress(total int) *Progress {
-	return &Progress{totalRepos: total, current: make(map[string]string)}
+	return &Progress{totalItems: total, current: make(map[string]string)}
 }
 
-func (p *Progress) set(repo, status string) {
+func (p *Progress) set(name, status string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.current[repo] = status
+	p.current[name] = status
 	p.print()
 }
 
-func (p *Progress) done(repo string) {
-	atomic.AddInt32(&p.doneRepos, 1)
+func (p *Progress) done(name string) {
+	atomic.AddInt32(&p.doneItems, 1)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.current, repo)
+	delete(p.current, name)
 	p.print()
 }
 
 func (p *Progress) print() {
-	done := int(atomic.LoadInt32(&p.doneRepos))
-	fmt.Fprintf(os.Stderr, "\r\033[K[%d/%d repos] ", done, p.totalRepos)
+	done := int(atomic.LoadInt32(&p.doneItems))
+	fmt.Fprintf(os.Stderr, "\r\033[K[%d/%d] ", done, p.totalItems)
 	var parts []string
-	for repo, status := range p.current {
-		parts = append(parts, fmt.Sprintf("%s: %s", repo, status))
+	for name, status := range p.current {
+		parts = append(parts, fmt.Sprintf("%s: %s", name, status))
 	}
 	if len(parts) > 0 {
 		fmt.Fprintf(os.Stderr, "%s", strings.Join(parts, " | "))
@@ -64,15 +64,22 @@ type WikiPage struct {
 	Content     string
 }
 
+// ── Repo Entry ──
+
+type RepoEntry struct {
+	Project string // group name (empty = standalone)
+	Repo    string // owner/repo
+}
+
 // ── Claude CLI ──
 
-func claudeCall(claudePath, model, repoDir, systemPrompt, prompt string) (string, error) {
+func claudeCall(claudePath, model string, repoDirs []string, systemPrompt, prompt string) (string, error) {
 	args := []string{"-p", "--output-format", "text", "--dangerously-skip-permissions"}
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	if repoDir != "" {
-		args = append(args, "--add-dir", repoDir)
+	for _, dir := range repoDirs {
+		args = append(args, "--add-dir", dir)
 	}
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
@@ -96,7 +103,6 @@ func claudeCall(claudePath, model, repoDir, systemPrompt, prompt string) (string
 
 func gitClone(repoURL, token, destDir string, useGH bool) error {
 	if _, err := os.Stat(filepath.Join(destDir, ".git")); err == nil {
-		// Already cloned, pull latest
 		cmd := exec.Command("git", "-C", destDir, "pull", "--ff-only")
 		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
@@ -104,7 +110,6 @@ func gitClone(repoURL, token, destDir string, useGH bool) error {
 	}
 
 	if useGH {
-		// Use gh CLI (uses gh's own auth, no PAT needed)
 		cmd := exec.Command("gh", "repo", "clone", repoURL, destDir, "--", "--depth=1", "--single-branch")
 		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
@@ -132,22 +137,27 @@ When the user requests XML output (e.g., wiki_structure, or any XML format):
 4. Start directly with the opening XML tag and end with the closing XML tag
 5. Ensure the XML is well-formed and valid`
 
-func structurePrompt(short, language string) string {
+func structurePrompt(projectName string, repos []string, language string) string {
 	langName := languageName(language)
-	return fmt.Sprintf(`You are an expert software architect and technical writer.
-Analyze the GitHub repository %s and design a comprehensive wiki structure for it.
+	repoList := strings.Join(repos, ", ")
 
-You have full access to the repository source code via the tools available to you.
+	return fmt.Sprintf(`You are an expert software architect and technical writer.
+Analyze the following repositories and design a comprehensive wiki structure.
+
+Project: %s
+Repositories: %s
+
+You have full access to ALL repository source code via the tools available to you.
 USE the Read, Grep, Glob, and Bash tools to thoroughly examine the codebase before designing the structure.
 
 Your task is to determine what documentation pages are needed based on WHAT ACTUALLY EXISTS in the codebase.
-Do NOT create pages for things that don't exist in the repository.
+Do NOT create pages for things that don't exist in the repositories.
 
 IMPORTANT: All content will be written in %s.
 
 ## Documentation Categories
 
-Analyze the repository and create pages from the following categories AS APPLICABLE:
+Analyze the repositories and create pages from the following categories AS APPLICABLE:
 
 ### A. Core Documentation (from code — factual)
 - **System Overview**: Project purpose, tech stack, directory structure
@@ -169,29 +179,36 @@ Analyze the repository and create pages from the following categories AS APPLICA
 - **Security Design**: Security measures found in middleware, validation, sanitization
 - **Performance Considerations**: Caching, lazy loading, optimization patterns found in code
 
-## Rules
+## Rules for Multi-Repository Projects
+- When multiple repositories form one project, create CROSS-REPOSITORY documentation
+- Show how repositories interact with each other (e.g., frontend calls backend API)
+- Create architecture pages that span all repositories
+- Individual repository details should still get their own focused pages
+- Clearly indicate which repository each page primarily covers
+
+## General Rules
 - Create pages ONLY for categories where substantial code evidence exists
-- Each page MUST map to actual files in the repository
-- If a category has no corresponding code, do NOT create a page for it — simply omit it
+- Each page MUST map to actual files in the repositories
+- If a category has no corresponding code, do NOT create a page — simply omit it
 - Prefer MORE pages with focused scope over FEWER pages with broad scope
-- The number of pages should be proportional to the repository's complexity and size
-- A tiny CLI tool might need 3-5 pages; a large monorepo might need 30+
-- Page titles should be specific (e.g., "REST API: User Endpoints" not just "API")
-- If a domain has many sub-components (e.g., 10 API endpoint groups), create separate pages for each
+- The number of pages should be proportional to the overall complexity
+- A tiny CLI tool might need 3-5 pages; a large multi-repo project might need 30+
+- Page titles should be specific
+- If a domain has many sub-components, create separate pages for each
 - Facts derived directly from code: always include
 - High-confidence inferences from code patterns: include
 - Pure speculation with no code evidence: NEVER include
 
 ## GitHub Wiki Link Format
 Each page will become a separate .md file in a GitHub Wiki.
-Page filenames will be derived from titles by replacing spaces with hyphens.
-When referencing other pages, use: [Link Text](Page-Filename)
+Page filenames: replace spaces with hyphens.
+Link format: [Link Text](Page-Filename)
 
 Return your analysis in the following XML format:
 
 <wiki_structure>
   <title>[Overall wiki title]</title>
-  <description>[Repository description]</description>
+  <description>[Project description]</description>
   <pages>
     <page id="page-1">
       <title>[Page title]</title>
@@ -209,11 +226,12 @@ Return your analysis in the following XML format:
 </wiki_structure>
 
 IMPORTANT: Return ONLY valid XML. Start with <wiki_structure> and end with </wiki_structure>.
-`, short, langName)
+`, projectName, repoList, langName)
 }
 
-func pagePrompt(page WikiPage, allPages []WikiPage, short, language, repoURL string) string {
+func pagePrompt(page WikiPage, allPages []WikiPage, projectName string, repos []string, language string) string {
 	langName := languageName(language)
+	repoList := strings.Join(repos, ", ")
 
 	var pageList strings.Builder
 	for _, p := range allPages {
@@ -222,10 +240,12 @@ func pagePrompt(page WikiPage, allPages []WikiPage, short, language, repoURL str
 		}
 	}
 
-	return fmt.Sprintf(`You are an expert technical writer creating a wiki page for the %s repository.
-Repository URL: %s
+	return fmt.Sprintf(`You are an expert technical writer creating a wiki page.
 
-You have full access to the repository source code via the tools available to you.
+Project: %s
+Repositories: %s
+
+You have full access to ALL repository source code via the tools available to you.
 USE the Read, Grep, Glob, and Bash tools to read actual source files before writing.
 Do NOT guess or speculate — read the code first, then document what you find.
 
@@ -243,33 +263,33 @@ When referencing other pages, use GitHub Wiki link format: [Page Title](Page-Fil
 ## Content Requirements
 
 ### 1. Introduction (1-2 paragraphs)
-- Purpose and scope of this page within the overall project
-- How this component/feature relates to the broader system
-- Link to related wiki pages where relevant
+- Purpose and scope of this page
+- How this relates to the broader system
+- Which repository/repositories this page covers
+- Link to related wiki pages
 
 ### 2. Detailed Sections (use ## and ### headings)
-For each section:
-- Explain the architecture, components, data flow, or logic
+- Explain architecture, components, data flow, or logic
 - Identify key functions, classes, data structures, API endpoints
-- Show how components interact with each other
+- For multi-repo projects: show cross-repository interactions
 
 ### 3. Mermaid Diagrams (EXTENSIVELY use these)
 - Use flowchart TD (top-down, NEVER use LR), sequenceDiagram, classDiagram, erDiagram
 - Every significant architectural concept should have a diagram
+- For multi-repo: show inter-service communication
 - Sequence diagrams: define ALL participants first, use proper arrow syntax
 - Keep node labels to 3-4 words max
 
 ### 4. Tables
-- Summarize structured information: API endpoints, config options, data fields, component props
+- Summarize structured information: API endpoints, config options, data fields
 
 ### 5. Code Snippets
 - Include short, relevant code snippets directly from source files
-- Use proper language identifiers in code blocks
 
 ### 6. Source Citations (CRITICAL)
 - For EVERY significant claim, cite the source file and line numbers
-- Format: Sources: [filename.ext:start_line-end_line](%s/blob/main/filename.ext#Lstart-Lend)
-- You MUST cite AT LEAST 5 different source files throughout the page
+- Format: Sources: [repo/filename.ext:lines]()
+- You MUST cite AT LEAST 5 different source files
 
 ### 7. Cross-Page Links
 - Link to related wiki pages using [Page Title](Page-Filename) format
@@ -277,17 +297,16 @@ For each section:
 
 ## Quality Rules
 - Facts from code: always include with source citations
-- High-confidence inferences from code patterns: include
-- Pure speculation with no code evidence: NEVER include — omit entirely without mentioning the absence
-- Do NOT write "this could not be determined" — just leave it out
+- High-confidence inferences: include
+- Pure speculation: NEVER include — omit entirely without mentioning the absence
 - Be thorough — this is production-grade documentation
 
 ## Format Rules
 - Start directly with the content (no preamble)
-- First line should be a brief intro paragraph (the # heading will be added automatically)
+- First line should be a brief intro paragraph (# heading added automatically)
 - Use ## for major sections, ### for subsections
 - End with a "Related Pages" section
-`, short, repoURL, page.Title, page.Description, langName, pageList.String(), repoURL)
+`, projectName, repoList, page.Title, page.Description, langName, pageList.String())
 }
 
 func languageName(code string) string {
@@ -320,7 +339,6 @@ func cleanXMLResponse(content string) string {
 	if idx := strings.LastIndex(content, "</wiki_structure>"); idx != -1 {
 		content = content[:idx+len("</wiki_structure>")]
 	}
-	// Remove /no_think tags
 	content = strings.ReplaceAll(content, "/no_think", "")
 	content = strings.ReplaceAll(content, "/think", "")
 	return content
@@ -350,10 +368,7 @@ func parsePages(xml string) []WikiPage {
 
 		if title != "" {
 			pages = append(pages, WikiPage{
-				ID:          id,
-				Title:       title,
-				Filename:    filename,
-				Description: desc,
+				ID: id, Title: title, Filename: filename, Description: desc,
 			})
 		}
 
@@ -392,8 +407,8 @@ func titleToFilename(title string) string {
 
 // ── Error Log ──
 
-func appendError(repoDir, msg string) {
-	errFile := filepath.Join(repoDir, "_errors.log")
+func appendError(dir, msg string) {
+	errFile := filepath.Join(dir, "_errors.log")
 	f, err := os.OpenFile(errFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return
@@ -404,31 +419,35 @@ func appendError(repoDir, msg string) {
 
 // ── Wiki Generation ──
 
-func generateWiki(claudePath, model, repo, token, language, outputDir, cloneDir string, pageParallel int, useGH bool, progress *Progress) error {
-	repoURL := repo
-	if !strings.HasPrefix(repo, "http") {
-		repoURL = fmt.Sprintf("https://github.com/%s", repo)
-	}
+func generateWiki(claudePath, model string, projectName string, repos []string, token, language, outputDir, cloneDir string, pageParallel int, useGH bool, progress *Progress) error {
 
-	parts := strings.Split(strings.TrimPrefix(strings.TrimPrefix(repoURL, "https://github.com/"), "https://gitlab.com/"), "/")
-	if len(parts) < 2 {
-		return fmt.Errorf("invalid repo format: %s", repo)
-	}
-	owner := parts[0]
-	repoName := strings.TrimSuffix(parts[1], ".git")
-	short := fmt.Sprintf("%s/%s", owner, repoName)
+	// Step 0: Clone all repositories
+	var repoDirs []string
+	for _, repo := range repos {
+		repoURL := repo
+		if !strings.HasPrefix(repo, "http") {
+			repoURL = fmt.Sprintf("https://github.com/%s", repo)
+		}
 
-	// Step 0: Clone repository
-	progress.set(short, "📥 cloning...")
-	repoDir := filepath.Join(cloneDir, fmt.Sprintf("%s_%s", owner, repoName))
-	if err := gitClone(repoURL, token, repoDir, useGH); err != nil {
-		return fmt.Errorf("clone: %w", err)
+		parts := strings.Split(strings.TrimPrefix(strings.TrimPrefix(repoURL, "https://github.com/"), "https://gitlab.com/"), "/")
+		if len(parts) < 2 {
+			return fmt.Errorf("invalid repo format: %s", repo)
+		}
+		owner := parts[0]
+		repoName := strings.TrimSuffix(parts[1], ".git")
+
+		progress.set(projectName, fmt.Sprintf("📥 cloning %s/%s...", owner, repoName))
+		repoDir := filepath.Join(cloneDir, fmt.Sprintf("%s_%s", owner, repoName))
+		if err := gitClone(repoURL, token, repoDir, useGH); err != nil {
+			return fmt.Errorf("clone %s: %w", repo, err)
+		}
+		repoDirs = append(repoDirs, repoDir)
 	}
 
 	// Step 1: Determine wiki structure
-	progress.set(short, "📋 structure...")
+	progress.set(projectName, "📋 structure...")
 
-	structureContent, err := claudeCall(claudePath, model, repoDir, xmlSystemPrompt, structurePrompt(short, language))
+	structureContent, err := claudeCall(claudePath, model, repoDirs, xmlSystemPrompt, structurePrompt(projectName, repos, language))
 	if err != nil {
 		return fmt.Errorf("structure: %w", err)
 	}
@@ -438,24 +457,23 @@ func generateWiki(claudePath, model, repo, token, language, outputDir, cloneDir 
 	if len(pages) == 0 {
 		return fmt.Errorf("no pages found in structure")
 	}
-	log.Printf("[%s] Structure: %d pages", short, len(pages))
+	log.Printf("[%s] Structure: %d pages", projectName, len(pages))
 
 	// Create output directory
-	wikiDir := filepath.Join(outputDir, repoName)
+	wikiDir := filepath.Join(outputDir, projectName)
 	if err := os.MkdirAll(wikiDir, 0755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 
-	// Collect all pages for cross-linking
 	var allPages []WikiPage
 	for _, p := range pages {
 		allPages = append(allPages, p)
 	}
 
 	// Write Home.md and _Sidebar.md immediately
-	writeHomeAndSidebar(wikiDir, short, structureContent, allPages)
+	writeHomeAndSidebar(wikiDir, projectName, structureContent, allPages, repos)
 
-	// Step 2: Generate pages (with page-level parallelism)
+	// Step 2: Generate pages with parallelism
 	var pageDone int32
 	pageSem := make(chan struct{}, pageParallel)
 	var pageWg sync.WaitGroup
@@ -468,18 +486,17 @@ func generateWiki(claudePath, model, repo, token, language, outputDir, cloneDir 
 			defer func() { <-pageSem }()
 
 			page := &allPages[idx]
-			progress.set(short, fmt.Sprintf("📝 %d/%d %s", atomic.LoadInt32(&pageDone)+1, len(allPages), page.Title))
+			progress.set(projectName, fmt.Sprintf("📝 %d/%d %s", atomic.LoadInt32(&pageDone)+1, len(allPages), page.Title))
 
-			content, err := claudeCall(claudePath, model, repoDir, "", pagePrompt(*page, allPages, short, language, repoURL))
+			content, err := claudeCall(claudePath, model, repoDirs, "", pagePrompt(*page, allPages, projectName, repos, language))
 			if err != nil {
-				log.Printf("[%s] page %s failed: %v", short, page.Title, err)
+				log.Printf("[%s] page %s failed: %v", projectName, page.Title, err)
 				content = fmt.Sprintf("*Content generation failed: %v*", err)
 				appendError(wikiDir, fmt.Sprintf("Page %d/%d: %s — %v", idx+1, len(allPages), page.Title, err))
 			}
 
 			page.Content = content
 
-			// Save immediately
 			filename := filepath.Join(wikiDir, page.Filename+".md")
 			fileContent := fmt.Sprintf("# %s\n\n%s\n", page.Title, page.Content)
 			if err := os.WriteFile(filename, []byte(fileContent), 0644); err != nil {
@@ -487,22 +504,29 @@ func generateWiki(claudePath, model, repo, token, language, outputDir, cloneDir 
 			}
 
 			done := atomic.AddInt32(&pageDone, 1)
-			log.Printf("[%s] Page %d/%d saved: %s (%d chars)", short, done, len(allPages), page.Title, len(content))
+			log.Printf("[%s] Page %d/%d saved: %s (%d chars)", projectName, done, len(allPages), page.Title, len(content))
 		}(i)
 	}
 	pageWg.Wait()
 
-	log.Printf("[%s] ✅ completed %s/ (%d pages)", short, wikiDir, len(allPages))
-	progress.done(short)
+	log.Printf("[%s] ✅ completed %s/ (%d pages)", projectName, wikiDir, len(allPages))
+	progress.done(projectName)
 	return nil
 }
 
-func writeHomeAndSidebar(wikiDir, short, structureContent string, allPages []WikiPage) {
+func writeHomeAndSidebar(wikiDir, projectName, structureContent string, allPages []WikiPage, repos []string) {
 	var home strings.Builder
-	home.WriteString(fmt.Sprintf("# %s\n\n", short))
+	home.WriteString(fmt.Sprintf("# %s\n\n", projectName))
 	desc := extractTag(structureContent, "description")
 	if desc != "" {
 		home.WriteString(fmt.Sprintf("%s\n\n", desc))
+	}
+	if len(repos) > 1 {
+		home.WriteString("## Repositories\n\n")
+		for _, r := range repos {
+			home.WriteString(fmt.Sprintf("- %s\n", r))
+		}
+		home.WriteString("\n")
 	}
 	home.WriteString(fmt.Sprintf("Generated: %s\n\n", time.Now().Format("2006-01-02 15:04:05")))
 	home.WriteString("## Pages\n\n")
@@ -512,15 +536,37 @@ func writeHomeAndSidebar(wikiDir, short, structureContent string, allPages []Wik
 	os.WriteFile(filepath.Join(wikiDir, "Home.md"), []byte(home.String()), 0644)
 
 	var sidebar strings.Builder
-	sidebar.WriteString("**[Home](Home)**\n\n")
-	sidebar.WriteString("---\n\n")
+	sidebar.WriteString("**[Home](Home)**\n\n---\n\n")
 	for _, page := range allPages {
 		sidebar.WriteString(fmt.Sprintf("- [%s](%s)\n", page.Title, page.Filename))
 	}
 	os.WriteFile(filepath.Join(wikiDir, "_Sidebar.md"), []byte(sidebar.String()), 0644)
 }
 
-// ── Env & Main ──
+// ── Repo List Parsing ──
+
+// Parse repos.txt supporting both formats:
+//   owner/repo              → standalone wiki
+//   project:owner/repo      → grouped into one wiki
+func parseRepoList(lines []string) (standalone []RepoEntry, groups map[string][]string) {
+	groups = make(map[string][]string)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if before, after, ok := strings.Cut(line, ":"); ok && !strings.Contains(before, "/") {
+			// project:owner/repo format
+			groups[before] = append(groups[before], after)
+		} else {
+			// standalone owner/repo format
+			standalone = append(standalone, RepoEntry{Repo: line})
+		}
+	}
+	return
+}
+
+// ── Env Helpers ──
 
 func envOrDefault(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
@@ -531,9 +577,9 @@ func envOrDefault(key, fallback string) string {
 
 func envOrDefaultInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
-		if n, err := fmt.Sscanf(v, "%d"); err == nil && n > 0 {
-			var i int
-			fmt.Sscan(v, &i)
+		var i int
+		fmt.Sscan(v, &i)
+		if i > 0 {
 			return i
 		}
 	}
@@ -569,17 +615,19 @@ func loadEnvFile() {
 	}
 }
 
+// ── Main ──
+
 func main() {
 	loadEnvFile()
 
 	var (
-		reposFile string
-		repos     string
-		token     string
-		model     string
-		language  string
-		outputDir string
-		cloneDir  string
+		reposFile    string
+		repos        string
+		token        string
+		model        string
+		language     string
+		outputDir    string
+		cloneDir     string
 		parallel     int
 		pageParallel int
 		logFile      string
@@ -588,16 +636,16 @@ func main() {
 	)
 
 	flag.StringVar(&reposFile, "f", "", "file containing repo list (one per line)")
-	flag.StringVar(&repos, "r", "", "comma-separated repo list (owner/repo)")
+	flag.StringVar(&repos, "r", "", "comma-separated repo list (owner/repo or project:owner/repo)")
 	flag.StringVar(&token, "token", os.Getenv("GITHUB_TOKEN"), "GitHub PAT (default: $GITHUB_TOKEN)")
 	flag.StringVar(&model, "model", envOrDefault("CLAUDE_MODEL", ""), "claude model (e.g., haiku, sonnet, opus)")
 	flag.StringVar(&language, "lang", envOrDefault("WIKI_LANGUAGE", "ja"), "output language")
-	flag.StringVar(&outputDir, "o", envOrDefault("WIKI_OUTPUT_DIR", "./wiki-output"), "output directory for wiki files")
-	flag.StringVar(&cloneDir, "clone-dir", envOrDefault("WIKI_CLONE_DIR", "./.repos"), "directory for cloned repositories")
+	flag.StringVar(&outputDir, "o", envOrDefault("WIKI_OUTPUT_DIR", "./wiki-output"), "output directory")
+	flag.StringVar(&cloneDir, "clone-dir", envOrDefault("WIKI_CLONE_DIR", "./.repos"), "clone directory")
 	flag.StringVar(&claudePath, "claude", "claude", "path to claude binary")
-	flag.IntVar(&parallel, "p", envOrDefaultInt("WIKI_PARALLEL", 1), "number of repos to process in parallel")
-	flag.IntVar(&pageParallel, "pp", envOrDefaultInt("WIKI_PAGE_PARALLEL", 3), "number of pages to generate in parallel per repo")
-	flag.BoolVar(&useGH, "gh", envOrDefaultBool("WIKI_USE_GH", false), "use gh CLI for cloning (no PAT needed)")
+	flag.IntVar(&parallel, "p", envOrDefaultInt("WIKI_PARALLEL", 1), "parallel projects/repos")
+	flag.IntVar(&pageParallel, "pp", envOrDefaultInt("WIKI_PAGE_PARALLEL", 3), "parallel pages per project")
+	flag.BoolVar(&useGH, "gh", envOrDefaultBool("WIKI_USE_GH", false), "use gh CLI for cloning")
 	flag.StringVar(&logFile, "log", "", "log file path (default: stderr)")
 	flag.Parse()
 
@@ -614,38 +662,55 @@ func main() {
 		log.SetOutput(f)
 	}
 
-	// Verify claude is available
 	if _, err := exec.LookPath(claudePath); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: claude CLI not found. Install from https://claude.ai/claude-code\n")
 		os.Exit(1)
 	}
 
-	var repoList []string
+	// Collect all lines
+	var lines []string
 	if reposFile != "" {
 		data, err := os.ReadFile(reposFile)
 		if err != nil {
 			log.Fatalf("Failed to read repos file: %v", err)
 		}
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") {
-				repoList = append(repoList, line)
-			}
-		}
+		lines = append(lines, strings.Split(string(data), "\n")...)
 	}
 	if repos != "" {
 		for _, r := range strings.Split(repos, ",") {
-			r = strings.TrimSpace(r)
-			if r != "" {
-				repoList = append(repoList, r)
-			}
+			lines = append(lines, r)
 		}
 	}
 
-	if len(repoList) == 0 {
+	standalone, groups := parseRepoList(lines)
+
+	// Build task list
+	type task struct {
+		name  string
+		repos []string
+	}
+	var tasks []task
+
+	for _, entry := range standalone {
+		parts := strings.Split(entry.Repo, "/")
+		name := entry.Repo
+		if len(parts) >= 2 {
+			name = parts[len(parts)-1]
+		}
+		tasks = append(tasks, task{name: name, repos: []string{entry.Repo}})
+	}
+	for project, repoList := range groups {
+		tasks = append(tasks, task{name: project, repos: repoList})
+	}
+
+	if len(tasks) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: wikigen [flags] owner/repo [owner/repo2 ...]")
-		fmt.Fprintln(os.Stderr, "       wikigen -r owner/repo1,owner/repo2")
 		fmt.Fprintln(os.Stderr, "       wikigen -f repos.txt")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "repos.txt format:")
+		fmt.Fprintln(os.Stderr, "  owner/repo                    # standalone wiki")
+		fmt.Fprintln(os.Stderr, "  project:owner/repo1           # grouped into one wiki")
+		fmt.Fprintln(os.Stderr, "  project:owner/repo2")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Prerequisites: git, claude CLI (authenticated)")
 		fmt.Fprintln(os.Stderr, "")
@@ -653,37 +718,43 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Fprintf(os.Stderr, "🚀 Processing %d repos (parallel: %d, model: %s, output: %s)\n\n",
-		len(repoList), parallel, func() string { if model != "" { return model }; return "default" }(), outputDir)
+	fmt.Fprintf(os.Stderr, "🚀 Processing %d wikis (parallel: %d, pages: %d, model: %s)\n\n",
+		len(tasks), parallel, pageParallel,
+		func() string {
+			if model != "" {
+				return model
+			}
+			return "default"
+		}())
 
-	progress := newProgress(len(repoList))
+	progress := newProgress(len(tasks))
 	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var failed []string
 	start := time.Now()
 
-	for _, repo := range repoList {
+	for _, t := range tasks {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(r string) {
+		go func(t task) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			if err := generateWiki(claudePath, model, r, token, language, outputDir, cloneDir, pageParallel, useGH, progress); err != nil {
-				log.Printf("[%s] ❌ %v", r, err)
-				progress.done(r)
+			if err := generateWiki(claudePath, model, t.name, t.repos, token, language, outputDir, cloneDir, pageParallel, useGH, progress); err != nil {
+				log.Printf("[%s] ❌ %v", t.name, err)
+				progress.done(t.name)
 				mu.Lock()
-				failed = append(failed, r)
+				failed = append(failed, t.name)
 				mu.Unlock()
 			}
-		}(repo)
+		}(t)
 	}
 
 	wg.Wait()
 
 	elapsed := time.Since(start).Round(time.Second)
-	fmt.Fprintf(os.Stderr, "\n\n✨ Done in %s — %d/%d succeeded\n", elapsed, len(repoList)-len(failed), len(repoList))
+	fmt.Fprintf(os.Stderr, "\n\n✨ Done in %s — %d/%d succeeded\n", elapsed, len(tasks)-len(failed), len(tasks))
 	if len(failed) > 0 {
 		fmt.Fprintf(os.Stderr, "❌ Failed: %s\n", strings.Join(failed, ", "))
 	}
