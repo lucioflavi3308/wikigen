@@ -304,11 +304,15 @@ When referencing other pages, use GitHub Wiki link format: [Page Title](Page-Fil
 - Pure speculation: NEVER include — omit entirely without mentioning the absence
 - Be thorough — this is production-grade documentation
 
-## Format Rules
-- Start directly with the content (no preamble)
+## Format Rules (CRITICAL — VIOLATION WILL INVALIDATE THE OUTPUT)
+- Output ONLY the wiki page content in Markdown
+- ABSOLUTELY NO preamble, summary, or commentary before or after the content
+- Do NOT write things like "I've completed...", "Here's the wiki...", "This page covers..."
+- Do NOT explain what you did or summarize the output
 - First line should be a brief intro paragraph (# heading added automatically)
 - Use ## for major sections, ### for subsections
 - End with a "Related Pages" section
+- The output will be saved directly to a .md file — anything that isn't wiki content will pollute the file
 `, projectName, repoList, page.Title, page.Description, langName, pageList.String())
 }
 
