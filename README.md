@@ -211,7 +211,7 @@ This project was inspired by [DeepWiki-Open](https://github.com/AsyncFuncAI/deep
 
 ### Claude Code Integration
 
-wikigen includes a `CLAUDE.md` skill file. When working in the wikigen directory, Claude Code can reference usage patterns and best practices automatically.
+wikigen includes a `.claude/skills/wikigen/SKILL.md` skill file. When working in the wikigen directory, Claude Code can reference usage patterns and best practices automatically.
 
 ---
 
@@ -417,4 +417,4 @@ git add -A && git commit -m "Update wiki" && git push
 
 ### Claude Code 連携
 
-`CLAUDE.md` スキルファイルを同梱。wikigen ディレクトリで作業中の Claude Code が使い方とベストプラクティスを自動参照できます。
+`SKILL.md` スキルファイルを同梱。wikigen ディレクトリで作業中の Claude Code が使い方とベストプラクティスを自動参照できます。
