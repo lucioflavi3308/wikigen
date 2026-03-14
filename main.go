@@ -118,17 +118,10 @@ func gitClone(repoURL, token, destDir string, useGH bool) error {
 		return cmd.Run()
 	}
 
-	// If using gh, get token from gh auth and clone with git
-	if useGH && token == "" {
-		token = getGHToken()
-		if token == "" {
-			return fmt.Errorf("gh auth token failed. Run: gh auth login")
-		}
-	}
-
-	cloneURL := repoURL
-	if token != "" {
-		cloneURL = strings.Replace(repoURL, "https://", fmt.Sprintf("https://%s@", token), 1)
+	// Always use SSH
+	cloneURL := strings.Replace(repoURL, "https://github.com/", "git@github.com:", 1)
+	if !strings.HasSuffix(cloneURL, ".git") {
+		cloneURL += ".git"
 	}
 
 	cmd := exec.Command("git", "clone", "--depth=1", "--single-branch", cloneURL, destDir)
