@@ -478,10 +478,12 @@ func generateWiki(claudePath, model string, projectName string, repos []string, 
 		Status:  "running",
 	}
 
-	// Validate all repos
-	for _, repo := range repos {
-		if err := validateRepo(repo); err != nil {
-			return result, err
+	// Validate all repos (skip in local mode)
+	if localDir == "" {
+		for _, repo := range repos {
+			if err := validateRepo(repo); err != nil {
+				return result, err
+			}
 		}
 	}
 
