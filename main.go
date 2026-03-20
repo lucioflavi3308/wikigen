@@ -70,13 +70,23 @@ type WikiPage struct {
 // ── Repo Entry ──
 
 type RepoEntry struct {
-	Project string // group name (empty = standalone)
-	Repo    string // owner/repo
+	Project  string // group name (empty = standalone)
+	Repo     string // owner/repo or display name for local
+	LocalDir string // local directory path (empty = remote repo)
 }
 
 // ── Input Validation ──
 
 var validRepoPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$`)
+
+func isLocalPath(s string) bool {
+	if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") || strings.HasPrefix(s, "~/") {
+		return true
+	}
+	// Check if it's an existing directory (handles "." and relative paths without prefix)
+	info, err := os.Stat(s)
+	return err == nil && info.IsDir()
+}
 
 func validateRepo(repo string) error {
 	if !validRepoPattern.MatchString(repo) {
@@ -87,6 +97,17 @@ func validateRepo(repo string) error {
 	}
 	if strings.ContainsAny(repo, ";&|`$(){}[]!~") {
 		return fmt.Errorf("invalid characters in repo: %q", repo)
+	}
+	return nil
+}
+
+func validateLocalDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("local directory not found: %q", dir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory: %q", dir)
 	}
 	return nil
 }
@@ -478,23 +499,31 @@ func generateWiki(claudePath, model string, projectName string, repos []string, 
 		Status:  "running",
 	}
 
-	// Validate all repos (skip in local mode)
-	if localDir == "" {
-		for _, repo := range repos {
+	// Validate and resolve all repos
+	var repoDirs []string
+	if localDir != "" {
+		// -local flag: use specified directory directly
+		absLocal, _ := filepath.Abs(localDir)
+		if err := validateLocalDir(absLocal); err != nil {
+			return result, err
+		}
+		progress.set(projectName, fmt.Sprintf("📂 using local %s", filepath.Base(absLocal)))
+		repoDirs = append(repoDirs, absLocal)
+	}
+	for _, repo := range repos {
+		if isLocalPath(repo) {
+			// Local directory in repo list — validate and use directly
+			absDir, _ := filepath.Abs(repo)
+			if err := validateLocalDir(absDir); err != nil {
+				return result, err
+			}
+			progress.set(projectName, fmt.Sprintf("📂 using local %s", filepath.Base(absDir)))
+			repoDirs = append(repoDirs, absDir)
+		} else {
+			// Remote repo — validate and clone
 			if err := validateRepo(repo); err != nil {
 				return result, err
 			}
-		}
-	}
-
-	// Step 0: Get repository code
-	var repoDirs []string
-	if localDir != "" {
-		// Use local directory directly (no clone needed)
-		absLocal, _ := filepath.Abs(localDir)
-		repoDirs = append(repoDirs, absLocal)
-	} else {
-		for _, repo := range repos {
 			repoURL := repo
 			if !strings.HasPrefix(repo, "http") {
 				repoURL = fmt.Sprintf("https://github.com/%s", repo)
@@ -678,9 +707,15 @@ func parseRepoList(lines []string) (standalone []RepoEntry, groups map[string][]
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if before, after, ok := strings.Cut(line, ":"); ok && !strings.Contains(before, "/") {
-			// project:owner/repo format
+		// Check for project group prefix (project:something)
+		// But be careful: /absolute/path contains "/" before ":", and
+		// project:/path is a valid group with local path
+		if before, after, ok := strings.Cut(line, ":"); ok && !strings.Contains(before, "/") && !isLocalPath(before) {
 			groups[before] = append(groups[before], after)
+		} else if isLocalPath(line) {
+			// standalone local directory
+			name := filepath.Base(line)
+			standalone = append(standalone, RepoEntry{Repo: name, LocalDir: line})
 		} else {
 			// standalone owner/repo format
 			standalone = append(standalone, RepoEntry{Repo: line})
@@ -959,6 +994,8 @@ func main() {
 		}
 	}
 
+	standalone, groups := parseRepoList(lines)
+
 	// Build task list
 	type task struct {
 		name  string
@@ -967,35 +1004,42 @@ func main() {
 	var tasks []task
 
 	if localDir != "" {
-		// Local mode: project name from positional arg or directory name
+		// -local flag mode: project name from positional arg or directory name
 		projectName := filepath.Base(localDir)
 		if flag.NArg() > 0 {
 			projectName = flag.Arg(0)
 		}
 		tasks = append(tasks, task{name: projectName, repos: []string{projectName}})
-	} else {
-		standalone, groups := parseRepoList(lines)
-		for _, entry := range standalone {
+	}
+	for _, entry := range standalone {
+		name := entry.Repo
+		if entry.LocalDir != "" {
+			// Local directory: use dir basename as name, pass path as repo
+			name = filepath.Base(entry.LocalDir)
+			tasks = append(tasks, task{name: name, repos: []string{entry.LocalDir}})
+		} else {
 			parts := strings.Split(entry.Repo, "/")
-			name := entry.Repo
 			if len(parts) >= 2 {
 				name = parts[len(parts)-1]
 			}
 			tasks = append(tasks, task{name: name, repos: []string{entry.Repo}})
 		}
-		for project, repoList := range groups {
-			tasks = append(tasks, task{name: project, repos: repoList})
-		}
+	}
+	for project, repoList := range groups {
+		tasks = append(tasks, task{name: project, repos: repoList})
 	}
 
 	if len(tasks) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: wikigen [flags] owner/repo [owner/repo2 ...]")
+		fmt.Fprintln(os.Stderr, "       wikigen [flags] /path/to/local/repo")
 		fmt.Fprintln(os.Stderr, "       wikigen -f repos.txt")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "repos.txt format:")
-		fmt.Fprintln(os.Stderr, "  owner/repo                    # standalone wiki")
+		fmt.Fprintln(os.Stderr, "  owner/repo                    # GitHub repo (cloned)")
+		fmt.Fprintln(os.Stderr, "  /path/to/local/repo           # local directory (no clone)")
+		fmt.Fprintln(os.Stderr, "  ./relative/path               # relative local directory")
 		fmt.Fprintln(os.Stderr, "  project:owner/repo1           # grouped into one wiki")
-		fmt.Fprintln(os.Stderr, "  project:owner/repo2")
+		fmt.Fprintln(os.Stderr, "  project:/path/to/local        # grouped local directory")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Prerequisites: git, claude CLI (authenticated)")
 		fmt.Fprintln(os.Stderr, "")
